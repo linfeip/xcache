@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+option go_package = ".;protocol";
+
+message Ping {
+  repeated Node nodes = 1;
+  uint64 time = 2;
+}
+
+message Pong {
+  repeated Node nodes = 1;
+}
+
+message Join {
+  Node node = 1;
+}
+
+message JoinAck {
+  repeated Node nodes = 1;
+}
+
+message Node {
+  uint64 id = 1;
+  string addr = 2;
+  Metadata metadata = 3;
+}
+
+message Metadata {
+  repeated KVPair pairs = 1;
+}
+
+message KVPair {
+  string key = 1;
+  string value = 2;
+}
+
+message ProtoRequest {
+  uint64 reqId = 1;
+  CMDType cmd = 2;
+  bytes data = 3;
+}
+
+message ProtoResponse {
+  uint64 reqId = 1;
+  uint32 cmd = 2;
+  bytes data = 3;
+}
+
+enum CMDType {
+  TNone = 0;
+  TPing = 1;
+  TPong = 2;
+  TJoin = 3;
+  TJoinAck = 4;
+}
+
+enum NodeState {
+  NSNone = 0;
+  NSActive = 1;
+  NSMaybeFail = 2;
+  NSFail = 3;
+}
