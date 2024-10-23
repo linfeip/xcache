@@ -5,24 +5,18 @@ option go_package = ".;protocol";
 message Ping {
   repeated Node nodes = 1;
   uint64 time = 2;
+  Node self = 3;
 }
 
 message Pong {
   repeated Node nodes = 1;
 }
 
-message Join {
-  Node node = 1;
-}
-
-message JoinAck {
-  repeated Node nodes = 1;
-}
-
 message Node {
   uint64 id = 1;
   string addr = 2;
-  Metadata metadata = 3;
+  NodeState state = 3;
+  Metadata metadata = 4;
 }
 
 message Metadata {
@@ -50,13 +44,11 @@ enum CMDType {
   TNone = 0;
   TPing = 1;
   TPong = 2;
-  TJoin = 3;
-  TJoinAck = 4;
 }
 
 enum NodeState {
   NSNone = 0;
   NSActive = 1;
-  NSMaybeFail = 2;
+  NSPFail = 2;
   NSFail = 3;
 }
