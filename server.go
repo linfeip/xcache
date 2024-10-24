@@ -38,7 +38,11 @@ func NewServer(ctx context.Context, addr string, opts ...ServerOption) Server {
 	for _, opt := range opts {
 		opt(&s.ServerOptions)
 	}
-	s.cluster = newCluster(s.ctx, s.id, s.addr)
+	s.router = &router{
+		cache: newCache(),
+	}
+	s.cluster = newCluster(s.ctx, s.id, s.addr, s.router)
+	s.router.cluster = s.cluster
 	return s
 }
 
@@ -49,6 +53,7 @@ type server struct {
 	addr     string
 	cluster  *cluster
 	listener net.Listener
+	router   *router
 }
 
 func (s *server) Id() uint64 {
@@ -91,7 +96,7 @@ func (s *server) Serve() error {
 			}
 			c := &connection{
 				Conn:    conn,
-				handler: s.cluster,
+				handler: s.router,
 				side:    SideServer,
 			}
 			go c.serve(s.ctx)

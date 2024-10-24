@@ -20,7 +20,7 @@ const (
 )
 
 type RequestHandler interface {
-	HandleRequest(conn *connection, request *protocol.ProtoRequest)
+	HandleRequest(conn *connection, request *protocol.ProtoFrame)
 	HandleDisconnected(conn *connection, err error)
 }
 
@@ -68,15 +68,16 @@ func (c *connection) serve(ctx context.Context) {
 	}
 }
 
-func (c *connection) encode(cmd protocol.CMDType, reqId uint64, msg proto.Message) []byte {
-	data, err := proto.Marshal(msg)
+func (c *connection) encode(f *Frame) []byte {
+	data, err := proto.Marshal(f.Message)
 	assert(err)
-	var request = &protocol.ProtoRequest{
-		Cmd:   cmd,
+	var frame = &protocol.ProtoFrame{
+		Cmd:   f.Cmd,
 		Data:  data,
-		ReqId: reqId,
+		ReqId: f.ReqId,
+		Error: f.Error,
 	}
-	rData, err := proto.Marshal(request)
+	rData, err := proto.Marshal(frame)
 	assert(err)
 	total := 4 + len(rData)
 	totalBytes := make([]byte, 4)
@@ -88,7 +89,7 @@ func (c *connection) encode(cmd protocol.CMDType, reqId uint64, msg proto.Messag
 	return buffer.Bytes()
 }
 
-func (c *connection) decode() *protocol.ProtoRequest {
+func (c *connection) decode() *protocol.ProtoFrame {
 	var totalBytes [4]byte
 	err := binary.Read(c, binary.LittleEndian, &totalBytes)
 	assert(err)
@@ -98,7 +99,7 @@ func (c *connection) decode() *protocol.ProtoRequest {
 	_, err = io.ReadFull(c, buffer)
 	assert(err)
 
-	var request = &protocol.ProtoRequest{}
+	var request = &protocol.ProtoFrame{}
 	err = proto.Unmarshal(buffer, request)
 	assert(err)
 

@@ -5,16 +5,15 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 	"xcache/protocol"
 )
 
 type ClusterEvent interface {
 	OnFail(node *protocol.Node)
+	OnPFail(node *protocol.Node)
 	OnActive(node *protocol.Node)
 }
 
@@ -29,7 +28,7 @@ type pendingPing struct {
 	ctime  time.Time
 }
 
-func newCluster(ctx context.Context, id uint64, addr string) *cluster {
+func newCluster(ctx context.Context, id uint64, addr string, handler RequestHandler) *cluster {
 	cl := &cluster{
 		ctx: ctx,
 		myself: &protocol.Node{
@@ -41,6 +40,7 @@ func newCluster(ctx context.Context, id uint64, addr string) *cluster {
 		conn2node:    make(map[*connection]*protocol.Node),
 		pendingPings: make(map[uint64]*pendingPing),
 		pfails:       make(map[uint64]map[uint64]struct{}),
+		handler:      handler,
 	}
 	// 把自己节点加入到nodes中
 	cl.nodes[cl.myself.Id] = cl.myself
@@ -51,12 +51,12 @@ type cluster struct {
 	rw           sync.RWMutex
 	ctx          context.Context
 	myself       *protocol.Node
-	nextId       uint64
 	nodes        map[uint64]*protocol.Node      // nodes
 	node2conn    map[uint64]*connection         // node-client
 	conn2node    map[*connection]*protocol.Node // client-node
 	pendingPings map[uint64]*pendingPing
 	pfails       map[uint64]map[uint64]struct{} // 可能下线的节点投票记录
+	handler      RequestHandler
 }
 
 func (cl *cluster) Myself() *protocol.Node {
@@ -84,7 +84,7 @@ func (cl *cluster) Join(target *protocol.Node) error {
 
 	client := &connection{
 		Conn:    cc,
-		handler: cl,
+		handler: cl.handler,
 		side:    SideClient,
 	}
 	cl.nodes[node.Id] = node
@@ -92,10 +92,14 @@ func (cl *cluster) Join(target *protocol.Node) error {
 	cl.conn2node[client] = node
 	go client.serve(cl.ctx)
 
-	reqId := cl.genId()
-	data := client.encode(protocol.CMDType_TPing, reqId, &protocol.Ping{
-		Nodes: []*protocol.Node{cl.myself},
-		Self:  cl.myself,
+	reqId := genId()
+	data := client.encode(&Frame{
+		ReqId: reqId,
+		Cmd:   protocol.CMDType_TPing,
+		Message: &protocol.Ping{
+			Nodes: []*protocol.Node{cl.myself},
+			Self:  cl.myself,
+		},
 	})
 	_, err = client.Write(data)
 	if err != nil {
@@ -125,19 +129,16 @@ func (cl *cluster) Len() int {
 	return l
 }
 
-func (cl *cluster) HandleRequest(conn *connection, request *protocol.ProtoRequest) {
-	switch request.Cmd {
-	case protocol.CMDType_TPing:
-		msg := &protocol.Ping{}
-		err := proto.Unmarshal(request.Data, msg)
-		assert(err)
-		cl.HandlePing(conn, request.GetReqId(), msg)
-	case protocol.CMDType_TPong:
-		msg := &protocol.Pong{}
-		err := proto.Unmarshal(request.Data, msg)
-		assert(err)
-		cl.HandlePong(conn, request.GetReqId(), msg)
+func (cl *cluster) Nodes() []*protocol.Node {
+	cl.rw.RLock()
+	defer cl.rw.RUnlock()
+	nodes := make([]*protocol.Node, 0, len(cl.nodes))
+	for _, n := range cl.nodes {
+		if n.State < protocol.NodeState_NSFail {
+			nodes = append(nodes, n)
+		}
 	}
+	return nodes
 }
 
 func (cl *cluster) HandleDisconnected(conn *connection, err error) {
@@ -169,12 +170,8 @@ func (cl *cluster) HandleDisconnected(conn *connection, err error) {
 	}
 }
 
-func (cl *cluster) HandlePing(conn *connection, reqId uint64, msg *protocol.Ping) {
+func (cl *cluster) HandlePing(conn *connection, msg *protocol.Ping) *protocol.Pong {
 	// server端收到ping包, 然后响应pong包
-	if len(msg.Nodes) == 0 {
-		return
-	}
-
 	cl.rw.Lock()
 	defer cl.rw.Unlock()
 
@@ -183,11 +180,7 @@ func (cl *cluster) HandlePing(conn *connection, reqId uint64, msg *protocol.Ping
 	// 向ping的目标节点写回pong消息
 	// 在当前节点集群中随机出3个节点响应到pong中
 	nodes := cl.randNodes(3, msg.Self.Id)
-	data := conn.encode(protocol.CMDType_TPong, reqId, &protocol.Pong{
-		Nodes: nodes,
-	})
-	_, err := conn.Write(data)
-	assert(err)
+	return &protocol.Pong{Nodes: nodes}
 }
 
 func (cl *cluster) HandlePong(conn *connection, reqId uint64, msg *protocol.Pong) {
@@ -265,7 +258,7 @@ func (cl *cluster) processNodes(sender *protocol.Node, nodes []*protocol.Node) {
 				continue
 			}
 			// 保存连接节点之间的对应关系
-			client := &connection{Conn: cc, handler: cl, side: SideClient}
+			client := &connection{Conn: cc, handler: cl.handler, side: SideClient}
 			cl.node2conn[node.Id] = client
 			cl.conn2node[client] = node
 			node.State = protocol.NodeState_NSActive
@@ -293,10 +286,6 @@ func (cl *cluster) contains(id uint64, ids []uint64) bool {
 		}
 	}
 	return false
-}
-
-func (cl *cluster) genId() uint64 {
-	return atomic.AddUint64(&cl.nextId, 1)
 }
 
 func (cl *cluster) workLoop() {
@@ -344,12 +333,15 @@ func (cl *cluster) processPing() {
 		pingNodes := cl.randNodes(3, node.Id)
 		conn := cl.node2conn[node.Id]
 		if conn != nil {
-			reqId := cl.genId()
-			data := conn.encode(protocol.CMDType_TPing, reqId, &protocol.Ping{
-				Nodes: pingNodes,
-				Self:  cl.myself,
+			reqId := genId()
+			data := conn.encode(&Frame{
+				ReqId: reqId,
+				Cmd:   protocol.CMDType_TPing,
+				Message: &protocol.Ping{
+					Nodes: pingNodes,
+					Self:  cl.myself,
+				},
 			})
-
 			_, err := conn.Write(data)
 			if err != nil {
 				log.Errorf("process ping failed, myself id: %d addr: %s conn write err: %v", cl.myself.Id, cl.myself.Addr, err)
@@ -370,7 +362,7 @@ func (cl *cluster) processPing() {
 				continue
 			}
 			// 成功建立连接
-			client := &connection{Conn: cc, handler: cl, side: SideClient}
+			client := &connection{Conn: cc, handler: cl.handler, side: SideClient}
 			// 加入连接中
 			cl.node2conn[node.Id] = client
 			cl.conn2node[client] = node

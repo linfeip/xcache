@@ -11,19 +11,20 @@ import (
 	"xcache/protocol"
 )
 
+func startServer(port int) Server {
+	srv := NewServer(context.Background(), fmt.Sprintf(":%d", port), WithId(uint64(port)))
+	srv.ServeAsync(func(err error) {
+		log.Errorf("server error: %v", err)
+	})
+	return srv
+}
+
 func TestServer(t *testing.T) {
 	go func() {
 		err := http.ListenAndServe(":6060", nil)
 		assert(err)
 	}()
 	beginPort := 5001
-	startServer := func(port int) Server {
-		srv := NewServer(context.Background(), fmt.Sprintf(":%d", port), WithId(uint64(port)))
-		srv.ServeAsync(func(err error) {
-			log.Errorf("server error: %v", err)
-		})
-		return srv
-	}
 
 	node1 := &protocol.Node{
 		Addr: ":5000",
